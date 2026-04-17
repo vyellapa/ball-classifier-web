@@ -42,8 +42,8 @@ You can override that with the `GTF_FILE` environment variable.
 1. Clone the repository:
 
 ```bash
-git clone <your-repo-url>
-cd ball-classifier-fixed
+git clone https://github.com/vyellapa/ball-classifier-web.git
+cd ball-classifier-web
 ```
 
 2. Install Node dependencies:
