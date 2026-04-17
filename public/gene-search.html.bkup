@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gene Search | B-ALL RNA-Seq Classifier</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/milligram/1.4.1/milligram.min.css" />
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<main class="page-shell">
+  <section class="hero">
+    <div class="hero-copy">
+      <div class="eyebrow">Interactive Analysis</div>
+      <h1>Gene Search</h1>
+      <p class="subtle">Compare your sample against the B-ALL reference cohort for a selected gene.</p>
+      <p class="run-meta" id="run-meta"></p>
+    </div>
+    <div class="page-actions">
+      <a class="button button-outline" href="/">Back To Pipeline</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="controls">
+      <input type="text" id="gene-input" placeholder="e.g. CRLF2, CDX2, PAX5" />
+      <button class="button" id="search-btn">Search Gene</button>
+      <a class="button button-outline" id="umap-link" href="#">Open UMAP Page</a>
+    </div>
+    <div id="status">Enter a gene symbol or Ensembl ID.</div>
+    <div id="plotly-chart"></div>
+  </section>
+</main>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const runId = params.get('runId') || '';
+const initialGene = params.get('gene') || '';
+
+document.getElementById('run-meta').textContent = runId ? `Run ID: ${runId}` : 'Run ID missing.';
+document.getElementById('umap-link').href = runId ? `/umap.html?runId=${encodeURIComponent(runId)}` : '#';
+document.getElementById('gene-input').value = initialGene;
+
+function setStatus(message, isError = false) {
+  const el = document.getElementById('status');
+  el.textContent = message;
+  el.className = isError ? 'error' : '';
+}
+
+async function searchGene() {
+  const gene = document.getElementById('gene-input').value.trim();
+  if (!runId) return setStatus('Run ID is missing from the page URL.', true);
+  if (!gene) return setStatus('Enter a gene name first.', true);
+
+  setStatus(`Loading ${gene}...`);
+  document.getElementById('plotly-chart').style.display = 'none';
+
+  try {
+    const resp = await fetch(`/api/search/${encodeURIComponent(runId)}/${encodeURIComponent(gene)}`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
+
+    const referenceRows = Array.isArray(data.reference) ? data.reference : [];
+    const plotData = [];
+    const subtypes = [...new Set(referenceRows.map(row => row.subtype || 'Unknown'))];
+    subtypes.forEach(subtype => {
+      const values = referenceRows
+        .filter(row => (row.subtype || 'Unknown') === subtype)
+        .map(row => Number(row.expression))
+        .filter(value => Number.isFinite(value));
+      plotData.push({
+        y: values,
+        type: 'box',
+        name: subtype,
+        boxpoints: 'all',
+        jitter: 0.45,
+        pointpos: 0,
+        fillcolor: 'rgba(91,141,238,0.18)',
+        line: { color: 'rgba(91,141,238,0.9)', width: 1.5 },
+        marker: { size: 5, opacity: 0.45, color: 'rgba(22,163,74,0.55)' },
+        hovertemplate: `${subtype}<br>Expression: %{y:.2f}<extra></extra>`
+      });
+    });
+
+    if (!plotData.length) {
+      throw new Error('No reference expression values were returned for this gene.');
+    }
+
+    plotData.sort((a, b) => {
+      const median = arr => arr.slice().sort((x, y) => x - y)[Math.floor(arr.length / 2)];
+      return median(a.y) - median(b.y);
+    });
+
+    Plotly.newPlot('plotly-chart', plotData, {
+      title: `<b>Expression of ${data.gene} across B-ALL Subtypes</b>`,
+      paper_bgcolor: 'white',
+      plot_bgcolor: 'white',
+      height: 680,
+      yaxis: { title: 'VST Expression', zeroline: false },
+      xaxis: { tickangle: 45, automargin: true },
+      showlegend: false,
+      shapes: [{
+        type: 'line',
+        x0: -0.5,
+        y0: data.sampleValue,
+        x1: plotData.length - 0.5,
+        y1: data.sampleValue,
+        line: { color: 'red', width: 2, dash: 'dash' }
+      }],
+      annotations: [{
+        x: 0,
+        y: data.sampleValue,
+        xref: 'x',
+        yref: 'y',
+        text: `Your Sample: ${data.sampleValue.toFixed(2)}`,
+        showarrow: true,
+        arrowhead: 2,
+        ax: 0,
+        ay: -30,
+        bgcolor: 'red',
+        font: { color: 'white' }
+      }],
+      margin: { b: 120 }
+    }, { responsive: true });
+
+    document.getElementById('plotly-chart').style.display = 'block';
+    setStatus(`Showing ${data.gene} for sample ${data.sampleId}.`);
+    history.replaceState(null, '', `/gene-search.html?runId=${encodeURIComponent(runId)}&gene=${encodeURIComponent(gene)}`);
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+document.getElementById('search-btn').addEventListener('click', searchGene);
+document.getElementById('gene-input').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') searchGene();
+});
+
+if (runId && initialGene) {
+  searchGene();
+}
+</script>
+</body>
+</html>

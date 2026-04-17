@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UMAP Projection | B-ALL RNA-Seq Classifier</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/milligram/1.4.1/milligram.min.css" />
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<main class="page-shell">
+  <section class="hero">
+    <div class="hero-copy">
+      <div class="eyebrow">Interactive Analysis</div>
+      <h1>UMAP Projection</h1>
+      <p class="subtle">Project the query sample against the B-ALL reference cohort embedding.</p>
+      <p class="run-meta" id="run-meta"></p>
+    </div>
+    <div class="page-actions">
+      <a class="button button-outline" href="/">Back To Pipeline</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="controls">
+      <button class="button" id="reload-btn">Reload Projection</button>
+      <a class="button button-outline" id="gene-link" href="#">Open Gene Search</a>
+    </div>
+    <div id="status">Loading embedding...</div>
+    <div id="umap-chart"></div>
+  </section>
+</main>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const runId = params.get('runId') || '';
+
+document.getElementById('run-meta').textContent = runId ? `Run ID: ${runId}` : 'Run ID missing.';
+document.getElementById('gene-link').href = runId ? `/gene-search.html?runId=${encodeURIComponent(runId)}` : '#';
+
+function setStatus(message, isError = false) {
+  const el = document.getElementById('status');
+  el.textContent = message;
+  el.className = isError ? 'error' : '';
+}
+
+async function loadUmap() {
+  if (!runId) return setStatus('Run ID is missing from the page URL.', true);
+  setStatus('Loading embedding...');
+  document.getElementById('umap-chart').style.display = 'none';
+
+  try {
+    const resp = await fetch(`/api/umap/${encodeURIComponent(runId)}`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
+
+    const refData = data.filter(d => !d.is_query);
+    const query = data.find(d => d.is_query);
+    const subtypeFor = row => row.diag || row.subtype || 'Unknown';
+    const subtypes = [...new Set(refData.map(subtypeFor))];
+
+    const plotData = subtypes.map(subtype => {
+      const subset = refData.filter(row => subtypeFor(row) === subtype);
+      return {
+        x: subset.map(row => row.uMAP_1),
+        y: subset.map(row => row.uMAP_2),
+        mode: 'markers',
+        type: 'scatter',
+        name: subtype,
+        text: subset.map(row => row.sample_id),
+        marker: { size: 7, opacity: 0.72 },
+        hovertemplate: '<b>%{text}</b><br>Subtype: ' + subtype + '<br>uMAP 1: %{x:.2f}<br>uMAP 2: %{y:.2f}<extra></extra>'
+      };
+    });
+
+    if (query) {
+      plotData.push({
+        x: [query.uMAP_1],
+        y: [query.uMAP_2],
+        mode: 'markers',
+        type: 'scatter',
+        name: '<b>YOUR SAMPLE</b>',
+        text: [query.sample_id || 'Query sample'],
+        customdata: [[
+          subtypeFor(query),
+          query.final_class || 'NA',
+          query.final_conf || 'NA',
+          query.mdall_call || 'NA',
+          Number.isFinite(query.mdall_score) ? query.mdall_score : null,
+          query.allcatcher_call || 'NA',
+          Number.isFinite(query.allcatcher_score) ? query.allcatcher_score : null,
+          query.allcatcher_conf || 'NA',
+          query.allsorts_call || 'NA',
+          Number.isFinite(query.allsorts_score) ? query.allsorts_score : null
+        ]],
+        marker: { size: 18, color: 'red', symbol: 'star', line: { color: 'black', width: 2 } }
+        ,
+        hovertemplate:
+          '<b>%{text}</b>' +
+          '<br>Assigned subtype: %{customdata[0]}' +
+          '<br>Final class: %{customdata[1]} (%{customdata[2]})' +
+          '<br>MD-ALL: %{customdata[3]} | score %{customdata[4]:.3f}' +
+          '<br>ALLCatcher: %{customdata[5]} | score %{customdata[6]:.3f} (%{customdata[7]})' +
+          '<br>ALLSorts: %{customdata[8]} | score %{customdata[9]:.3f}' +
+          '<br>uMAP 1: %{x:.2f}' +
+          '<br>uMAP 2: %{y:.2f}<extra></extra>'
+      });
+    }
+
+    Plotly.newPlot('umap-chart', plotData, {
+      title: '<b>PhenoGraph UMAP Projection</b>',
+      paper_bgcolor: 'white',
+      plot_bgcolor: 'white',
+      height: 900,
+      hovermode: 'closest',
+      xaxis: { title: 'uMAP 1', zeroline: false },
+      yaxis: { title: 'uMAP 2', zeroline: false },
+      legend: { itemsizing: 'constant', orientation: 'v', x: 1.05 }
+    }, { responsive: true });
+
+    document.getElementById('umap-chart').style.display = 'block';
+    setStatus(`Loaded ${refData.length + (query ? 1 : 0)} points.`);
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+document.getElementById('reload-btn').addEventListener('click', loadUmap);
+loadUmap();
+</script>
+</body>
+</html>

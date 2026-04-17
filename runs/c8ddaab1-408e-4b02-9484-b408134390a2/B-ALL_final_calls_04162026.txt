@@ -1,0 +1,2 @@
+sample_id	final_class	final_conf	final_terminal_class
+COG_BM_RNA_0002_dragen.quant.genes.sf	DUX4	hi-conf	na

@@ -1,0 +1,2 @@
+sample_id	AllCatcher_call	AllCatcher_terminal	AllCatcher_score	AllCatcher_conf	Sex	AllSorts_call	AllSorts_terminal	AllSorts_score	rank_as	MDALL_call	MDALL_score	rank_md	final_class	final_conf	final_terminal_class
+COG_BM_RNA_0001_dragen.quant.genes.sf	DUX4	na	0.95	high-confidence	M	DUX4	na	0.898	1	DUX4	1	1	DUX4	hi-conf	na

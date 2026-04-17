@@ -1,0 +1,365 @@
+/**
+ * B-ALL Classifier Web Server — Fixed v2
+ */
+
+const express    = require('express');
+const multer     = require('multer');
+const path       = require('path');
+const fs         = require('fs');
+const { execFile } = require('child_process');
+const { v4: uuidv4 } = require('uuid');
+
+const app  = express();
+const PORT = process.env.PORT || 3000;
+
+const SCRIPTS_DIR = path.join(__dirname, 'scripts');
+const RUNS_DIR    = path.join(__dirname, 'runs');
+const DEFAULT_GTF = process.env.GTF_FILE || path.join(__dirname, 'resources', 'gtf1.txt');
+
+fs.mkdirSync(RUNS_DIR, { recursive: true });
+
+const jobs = {};
+
+function listRunOutputs(runDir) {
+  if (!fs.existsSync(runDir)) return [];
+  return fs.readdirSync(runDir).filter(f =>
+    f.startsWith('B-ALL_') || f.startsWith('MDall_output_') ||
+    f === 'counts.csv' || f === 'counts.v2.csv'
+  );
+}
+
+function getRunArtifacts(runDir) {
+  if (!fs.existsSync(runDir)) {
+    return { hasGeneSearch: false, hasUmap: false, outputs: [], sampleName: null };
+  }
+
+  const files = fs.readdirSync(runDir);
+  const quantFile = files.find(f =>
+    f.endsWith('_dragen.quant.genes.sf') ||
+    f === 'quant.sf' ||
+    f.endsWith('.quant.sf') ||
+    f.endsWith('.genes.sf')
+  );
+  const sampleName = quantFile
+    ? quantFile
+        .replace(/_dragen\.quant\.genes\.sf$/i, '')
+        .replace(/\.quant\.sf$/i, '')
+        .replace(/\.genes\.sf$/i, '')
+        .replace(/\.sf$/i, '')
+    : null;
+
+  return {
+    hasGeneSearch: files.some(f => f.startsWith('vst_data_') && f.endsWith('.rds')),
+    hasUmap: files.some(f => f.startsWith('umap_data_') && f.endsWith('.json')),
+    outputs: listRunOutputs(runDir),
+    sampleName
+  };
+}
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Inject runId before Multer destination fires
+app.use('/upload', (req, res, next) => {
+  req.runId = uuidv4();
+  next();
+});
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const runDir = path.join(RUNS_DIR, req.runId);
+    fs.mkdirSync(runDir, { recursive: true });
+    cb(null, runDir);
+  },
+  filename: (req, file, cb) => cb(null, file.originalname)
+});
+
+// Accept only the user-provided inputs. bll_v3.R generates predictions.tsv
+// and allsorts_results/probabilities.csv inside the run directory.
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    const allowed = ['quantSf', 'gtfFile'];
+    if (allowed.includes(file.fieldname)) return cb(null, true);
+    cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', file.fieldname));
+  },
+  limits: { fileSize: 500 * 1024 * 1024 }
+});
+
+app.post('/upload', upload.fields([
+  { name: 'quantSf',    maxCount: 1 },
+  { name: 'gtfFile',    maxCount: 1 }
+]), async (req, res) => {
+
+  const runId  = req.runId;
+  const runDir = path.join(RUNS_DIR, runId);
+
+  jobs[runId] = {
+    status: 'queued',
+    label: (req.body.runLabel || runId).replace(/[^a-zA-Z0-9_-]/g, '_'),
+    log: [],
+    outputs: [],
+    error: null,
+    startedAt: new Date().toISOString()
+  };
+
+  try {
+    if (!req.files?.['quantSf'])    return res.status(400).json({ error: 'quantSf (quant.sf) is required.' });
+
+    // FIX: v2 used only filename, not full path — GTF would not be found
+    let gtfPath = DEFAULT_GTF;
+    if (req.files?.['gtfFile']) {
+      gtfPath = req.files['gtfFile'][0].path;  // full absolute path
+    }
+
+    const runLabel       = jobs[runId].label;
+    const lowConf        = parseFloat(req.body.lowConf)  || 0.4;
+    const highConf       = parseFloat(req.body.highConf) || 0.8;
+
+    res.json({ runId, message: 'Job queued.' });
+
+    runPipeline({ runId, runDir, runLabel, gtfPath, lowConf, highConf });
+
+  } catch (err) {
+    jobs[runId].status = 'failed';
+    jobs[runId].error  = err.message;
+    if (!res.headersSent) res.status(500).json({ error: err.message, runId });
+  }
+});
+
+app.get('/status/:runId', (req, res) => {
+  const job = jobs[req.params.runId];
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+});
+
+app.get('/runs', (req, res) => {
+  const memoryRuns = new Map(
+    Object.entries(jobs).map(([id, j]) => {
+      const runDir = path.join(RUNS_DIR, id);
+      const artifacts = getRunArtifacts(runDir);
+      return [id, {
+        runId: id,
+        label: j.label,
+        sampleName: artifacts.sampleName,
+        status: j.status,
+        startedAt: j.startedAt,
+        outputs: j.outputs?.length ? j.outputs : artifacts.outputs,
+        hasGeneSearch: artifacts.hasGeneSearch,
+        hasUmap: artifacts.hasUmap
+      }];
+    })
+  );
+
+  const diskRuns = fs.readdirSync(RUNS_DIR, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => {
+      const runId = entry.name;
+      const runDir = path.join(RUNS_DIR, runId);
+      const artifacts = getRunArtifacts(runDir);
+      const stats = fs.statSync(runDir);
+      return {
+        runId,
+        label: runId,
+        sampleName: artifacts.sampleName,
+        status: artifacts.outputs.length ? 'completed' : 'unknown',
+        startedAt: stats.birthtime?.toISOString?.() || stats.mtime.toISOString(),
+        outputs: artifacts.outputs,
+        hasGeneSearch: artifacts.hasGeneSearch,
+        hasUmap: artifacts.hasUmap
+      };
+    });
+
+  for (const run of diskRuns) {
+    if (!memoryRuns.has(run.runId)) memoryRuns.set(run.runId, run);
+  }
+
+  res.json(
+    Array.from(memoryRuns.values())
+      .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
+  );
+});
+
+app.get('/download/:runId/:filename', (req, res) => {
+  const { runId, filename } = req.params;
+  if (filename.includes('..') || filename.includes('/')) return res.status(400).send('Invalid filename');
+  const filePath = path.join(RUNS_DIR, runId, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File not found');
+  res.download(filePath);
+});
+
+app.get('/api/search/:runId/:gene', (req, res) => {
+  const { runId } = req.params;
+  const gene = String(req.params.gene || '').trim();
+  const runDir   = path.join(RUNS_DIR, runId);
+  if (!gene) return res.status(400).json({ error: 'Gene is required.' });
+
+  execFile(
+    'Rscript',
+    [path.join(SCRIPTS_DIR, 'get_gene_data.R'), runDir, gene],
+    { cwd: runDir },
+    (error, stdout, stderr) => {
+      if (error) {
+        return res.status(500).json({
+          error: stderr?.trim() || stdout?.trim() || error.message
+        });
+      }
+
+      try {
+        const dataPath = path.join(runDir, 'search_results.json');
+        if (!fs.existsSync(dataPath)) {
+          throw new Error('Gene expression JSON was not generated.');
+        }
+        res.json(JSON.parse(fs.readFileSync(dataPath, 'utf8')));
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    }
+  );
+});
+
+app.get('/api/umap/:runId', (req, res) => {
+  const runDir = path.join(RUNS_DIR, req.params.runId);
+  try {
+    const files    = fs.readdirSync(runDir);
+    const umapFile = files.find(f => f.startsWith('umap_data') && f.endsWith('.json'));
+    if (umapFile) {
+      const umapPath = path.join(runDir, umapFile);
+      const umapData = JSON.parse(fs.readFileSync(umapPath, 'utf8'));
+      const mergedFile = files.find(f => f.startsWith('B-ALL_merged_calls_') && f.endsWith('.txt'));
+      const finalFile = files.find(f => f.startsWith('B-ALL_final_calls_') && f.endsWith('.txt'));
+      let finalCalls = [];
+
+      if (mergedFile) {
+        const mergedPath = path.join(runDir, mergedFile);
+        const [headerLine, ...rows] = fs.readFileSync(mergedPath, 'utf8').trim().split(/\r?\n/);
+        const headers = headerLine.split('\t');
+        const mergedRows = rows
+          .filter(Boolean)
+          .map(line => Object.fromEntries(line.split('\t').map((value, index) => [headers[index], value])));
+
+        const queryPoint = umapData.find(point => point.is_query);
+        if (queryPoint) {
+          const scoreRow = mergedRows.find(row => row.sample_id === queryPoint.sample_id);
+          if (scoreRow) {
+            Object.assign(queryPoint, {
+              allcatcher_call: scoreRow.AllCatcher_call,
+              allcatcher_score: Number(scoreRow.AllCatcher_score),
+              allcatcher_conf: scoreRow.AllCatcher_conf,
+              allsorts_call: scoreRow.AllSorts_call,
+              allsorts_score: Number(scoreRow.AllSorts_score),
+              mdall_call: scoreRow.MDALL_call,
+              mdall_score: Number(scoreRow.MDALL_score),
+              final_class: scoreRow.final_class,
+              final_conf: scoreRow.final_conf
+            });
+          }
+        }
+      }
+
+      if (finalFile) {
+        const finalPath = path.join(runDir, finalFile);
+        const lines = fs.readFileSync(finalPath, 'utf8').trim().split(/\r?\n/).filter(Boolean);
+        if (lines.length > 1) {
+          const headers = lines[0].split('\t');
+          finalCalls = lines.slice(1).map(line =>
+            Object.fromEntries(line.split('\t').map((value, index) => [headers[index], value]))
+          );
+        }
+      }
+
+      return res.json({ umap: umapData, finalCalls });
+    }
+    res.status(404).json({ error: 'UMAP data not found.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve UMAP data.' });
+  }
+});
+
+// ── Pipeline ──────────────────────────────────────────────────────────────────
+async function runPipeline({ runId, runDir, runLabel, gtfPath, lowConf, highConf }) {
+  const job = jobs[runId];
+  function log(msg) {
+    const line = `[${new Date().toISOString()}] ${msg}`;
+    console.log(line);
+    job.log.push(line);
+  }
+
+  try {
+    job.status = 'running';
+    log(`Pipeline started — ${runLabel}`);
+
+    // Step 1: bll_v3.R
+    // FIX: v2 used wrong flags (--sample, --counts, --gtf)
+    //      Correct flags per bll_v3.R optparse: -i (indir), -g (gtf), -o (output suffix)
+    log('Step 1/2 — bll_v3.R…');
+    await runR(
+      path.join(SCRIPTS_DIR, 'bll_v3.R'),
+      ['-i', runDir, '-g', gtfPath, '-o', runLabel],
+      { cwd: runDir },
+      log
+    );
+    log('bll_v3.R done.');
+
+    const mdallOutput = path.join(runDir, `MDall_output_${runLabel}.txt`);
+    if (!fs.existsSync(mdallOutput)) {
+      throw new Error(`Expected MDALL output not found: MDall_output_${runLabel}.txt`);
+    }
+
+    const allcatcherPath = path.join(runDir, 'predictions.tsv');
+    if (!fs.existsSync(allcatcherPath)) {
+      throw new Error('Expected ALLCatchR output not found: predictions.tsv');
+    }
+
+    const allsortsDest = path.join(runDir, 'allsorts_results', 'probabilities.csv');
+    if (!fs.existsSync(allsortsDest)) {
+      throw new Error('Expected ALLSorts output not found: allsorts_results/probabilities.csv');
+    }
+
+    // Step 2: BALL_classifier_postProcess_v5.R
+    // Consume ALLCatchR and ALLSorts outputs generated by bll_v3.R.
+    log('Step 2/2 — BALL_classifier_postProcess_v5.R…');
+    await runR(
+      path.join(SCRIPTS_DIR, 'BALL_classifier_postProcess_v5.R'),
+      ['-m', mdallOutput, '-c', allcatcherPath, '-s', allsortsDest, '-l', String(lowConf), '-u', String(highConf)],
+      { cwd: runDir },
+      log
+    );
+    log('Post-processing done.');
+
+    job.outputs = listRunOutputs(runDir);
+
+    job.status = 'completed';
+    log(`Done. Files: ${job.outputs.join(', ')}`);
+
+  } catch (err) {
+    job.status = 'failed';
+    job.error  = err.message;
+    log(`ERROR: ${err.message}`);
+  }
+}
+
+function runR(scriptPath, args, options, log) {
+  return new Promise((resolve, reject) => {
+    const proc = execFile('Rscript', [scriptPath, ...args], options, (error, stdout, stderr) => {
+      if (error) reject(new Error(`Rscript exited ${error.code}: ${stderr || error.message}`));
+      else resolve(stdout);
+    });
+    proc.stdout.on('data', d => d.toString().split('\n').filter(Boolean).forEach(l => log(`  [R] ${l}`)));
+    proc.stderr.on('data', d => d.toString().split('\n').filter(Boolean).forEach(l => log(`  [R stderr] ${l}`)));
+  });
+}
+
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+
+app.listen(PORT, () => {
+  console.log(`\n🧬 B-ALL Classifier → http://localhost:${PORT}`);
+  console.log(`   GTF:     ${DEFAULT_GTF}`);
+  console.log(`   Scripts: ${SCRIPTS_DIR}\n`);
+});
+
+module.exports = app;

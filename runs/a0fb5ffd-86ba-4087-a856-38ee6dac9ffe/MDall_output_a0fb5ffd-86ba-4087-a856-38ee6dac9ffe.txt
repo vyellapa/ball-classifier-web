@@ -1,0 +1,2 @@
+sample_id	CDX2	CRLF2	NUTM1	phenoGraph_pred	phenoGraph_predScore	phenoGraph_predLabel	svm_pred	svm_predScore	svm_predLabel
+COG_BM_RNA_0001_dragen.quant.genes.sf	3.184342	3.996511	3.068854	DUX4	1	DUX4,11(1)	DUX4	1	DUX4,11(1)
