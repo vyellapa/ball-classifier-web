@@ -142,6 +142,36 @@ Typical output files include:
 - `predictions.tsv`
 - `allsorts_results/probabilities.csv`
 
+## Architecture
+
+```mermaid
+flowchart TD
+    U[Browser UI<br/>public/index.html<br/>gene-search.html<br/>umap.html] -->|POST /upload| S[Node.js / Express Server<br/>server.js]
+    U -->|GET /status/:runId| S
+    U -->|GET /runs| S
+    U -->|GET /download/:runId/:filename| S
+    U -->|GET /api/search/:runId/:gene| S
+    U -->|GET /api/umap/:runId| S
+
+    S -->|stores uploads and outputs| R[runs/<run-id>/]
+    S -->|writes status, logs, outputs| M[run-manifest.json]
+    M --> R
+
+    S -->|execFile Rscript| P1[bll_v3.R]
+    P1 -->|generates counts, predictions,<br/>ALLSorts, MDALL, UMAP inputs| R
+
+    S -->|execFile Rscript| P2[BALL_classifier_postProcess_v5.R]
+    P2 -->|merges classifier outputs| R
+
+    S -->|execFile Rscript| P3[get_gene_data.R]
+    P3 -->|writes search_results.json| R
+
+    R -->|startup scan + manifest load| S
+    S -->|restores run history after restart| U
+```
+
+At a high level, the browser talks only to the Express server. The server owns file upload, job lifecycle, restart recovery, and execution of the R scripts. Each run is isolated in `runs/<run-id>/`, which contains both the generated analysis files and the persisted `run-manifest.json` used by the UI history.
+
 ## Project Layout
 
 ```text
