@@ -15,10 +15,50 @@ const PORT = process.env.PORT || 3000;
 const SCRIPTS_DIR = path.join(__dirname, 'scripts');
 const RUNS_DIR    = path.join(__dirname, 'runs');
 const DEFAULT_GTF = process.env.GTF_FILE || path.join(__dirname, 'resources', 'gtf1.txt');
+const RUN_MANIFEST = 'run-manifest.json';
 
 fs.mkdirSync(RUNS_DIR, { recursive: true });
 
 const jobs = {};
+
+function sanitizeLabel(value, fallback) {
+  return String(value || fallback).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function getManifestPath(runDir) {
+  return path.join(runDir, RUN_MANIFEST);
+}
+
+function readManifest(runDir) {
+  const manifestPath = getManifestPath(runDir);
+  if (!fs.existsSync(manifestPath)) return null;
+
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch (err) {
+    console.warn(`Failed to read manifest: ${manifestPath}`, err.message);
+    return null;
+  }
+}
+
+function persistJob(job) {
+  const runDir = path.join(RUNS_DIR, job.runId);
+  fs.mkdirSync(runDir, { recursive: true });
+
+  const record = {
+    runId: job.runId,
+    label: job.label,
+    status: job.status,
+    log: Array.isArray(job.log) ? job.log : [],
+    outputs: Array.isArray(job.outputs) ? job.outputs : [],
+    error: job.error || null,
+    startedAt: job.startedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    endedAt: job.endedAt || null
+  };
+
+  fs.writeFileSync(getManifestPath(runDir), JSON.stringify(record, null, 2));
+}
 
 function listRunOutputs(runDir) {
   if (!fs.existsSync(runDir)) return [];
@@ -56,8 +96,71 @@ function getRunArtifacts(runDir) {
   };
 }
 
+function buildRunSummary(runId, job) {
+  const runDir = path.join(RUNS_DIR, runId);
+  const artifacts = getRunArtifacts(runDir);
+  const stats = fs.existsSync(runDir) ? fs.statSync(runDir) : null;
+  const outputs = job?.outputs?.length ? job.outputs : artifacts.outputs;
+
+  return {
+    runId,
+    label: job?.label || runId,
+    sampleName: artifacts.sampleName,
+    status: job?.status || (outputs.length ? 'completed' : 'unknown'),
+    startedAt: job?.startedAt || stats?.birthtime?.toISOString?.() || stats?.mtime?.toISOString?.() || new Date().toISOString(),
+    updatedAt: job?.updatedAt || stats?.mtime?.toISOString?.() || null,
+    endedAt: job?.endedAt || null,
+    log: job?.log || [],
+    outputs,
+    error: job?.error || null,
+    hasGeneSearch: artifacts.hasGeneSearch,
+    hasUmap: artifacts.hasUmap
+  };
+}
+
+function listStoredRuns() {
+  if (!fs.existsSync(RUNS_DIR)) return [];
+
+  return fs.readdirSync(RUNS_DIR, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => {
+      const runId = entry.name;
+      const manifest = readManifest(path.join(RUNS_DIR, runId));
+      return buildRunSummary(runId, manifest);
+    })
+    .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
+}
+
+function hydrateJobsFromDisk() {
+  for (const run of listStoredRuns()) {
+    const job = {
+      runId: run.runId,
+      label: run.label,
+      status: run.status,
+      log: run.log || [],
+      outputs: run.outputs || [],
+      error: run.error || null,
+      startedAt: run.startedAt,
+      updatedAt: run.updatedAt,
+      endedAt: run.endedAt
+    };
+
+    if (job.status === 'queued' || job.status === 'running') {
+      job.status = 'interrupted';
+      job.error = job.error || 'Server restarted before the run finished.';
+      job.endedAt = new Date().toISOString();
+      job.log.push(`[${job.endedAt}] Server restarted before the run finished. Marking run as interrupted.`);
+      persistJob(job);
+    }
+
+    jobs[run.runId] = job;
+  }
+}
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
+
+hydrateJobsFromDisk();
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -98,17 +201,21 @@ app.post('/upload', upload.fields([
   const runId  = req.runId;
   const runDir = path.join(RUNS_DIR, runId);
 
-  jobs[runId] = {
-    status: 'queued',
-    label: (req.body.runLabel || runId).replace(/[^a-zA-Z0-9_-]/g, '_'),
-    log: [],
-    outputs: [],
-    error: null,
-    startedAt: new Date().toISOString()
-  };
-
   try {
     if (!req.files?.['quantSf'])    return res.status(400).json({ error: 'quantSf (quant.sf) is required.' });
+
+    jobs[runId] = {
+      runId,
+      status: 'queued',
+      label: sanitizeLabel(req.body.runLabel, runId),
+      log: [],
+      outputs: [],
+      error: null,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      endedAt: null
+    };
+    persistJob(jobs[runId]);
 
     // FIX: v2 used only filename, not full path — GTF would not be found
     let gtfPath = DEFAULT_GTF;
@@ -125,63 +232,25 @@ app.post('/upload', upload.fields([
     runPipeline({ runId, runDir, runLabel, gtfPath, lowConf, highConf });
 
   } catch (err) {
-    jobs[runId].status = 'failed';
-    jobs[runId].error  = err.message;
+    if (jobs[runId]) {
+      jobs[runId].status = 'failed';
+      jobs[runId].error  = err.message;
+      jobs[runId].endedAt = new Date().toISOString();
+      persistJob(jobs[runId]);
+    }
     if (!res.headersSent) res.status(500).json({ error: err.message, runId });
   }
 });
 
 app.get('/status/:runId', (req, res) => {
-  const job = jobs[req.params.runId];
+  const runId = req.params.runId;
+  const job = jobs[runId] || readManifest(path.join(RUNS_DIR, runId));
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
+  res.json(buildRunSummary(runId, job));
 });
 
 app.get('/runs', (req, res) => {
-  const memoryRuns = new Map(
-    Object.entries(jobs).map(([id, j]) => {
-      const runDir = path.join(RUNS_DIR, id);
-      const artifacts = getRunArtifacts(runDir);
-      return [id, {
-        runId: id,
-        label: j.label,
-        sampleName: artifacts.sampleName,
-        status: j.status,
-        startedAt: j.startedAt,
-        outputs: j.outputs?.length ? j.outputs : artifacts.outputs,
-        hasGeneSearch: artifacts.hasGeneSearch,
-        hasUmap: artifacts.hasUmap
-      }];
-    })
-  );
-
-  const diskRuns = fs.readdirSync(RUNS_DIR, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .map(entry => {
-      const runId = entry.name;
-      const runDir = path.join(RUNS_DIR, runId);
-      const artifacts = getRunArtifacts(runDir);
-      const stats = fs.statSync(runDir);
-      return {
-        runId,
-        label: runId,
-        sampleName: artifacts.sampleName,
-        status: artifacts.outputs.length ? 'completed' : 'unknown',
-        startedAt: stats.birthtime?.toISOString?.() || stats.mtime.toISOString(),
-        outputs: artifacts.outputs,
-        hasGeneSearch: artifacts.hasGeneSearch,
-        hasUmap: artifacts.hasUmap
-      };
-    });
-
-  for (const run of diskRuns) {
-    if (!memoryRuns.has(run.runId)) memoryRuns.set(run.runId, run);
-  }
-
-  res.json(
-    Array.from(memoryRuns.values())
-      .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
-  );
+  res.json(listStoredRuns());
 });
 
 app.get('/download/:runId/:filename', (req, res) => {
@@ -287,10 +356,14 @@ async function runPipeline({ runId, runDir, runLabel, gtfPath, lowConf, highConf
     const line = `[${new Date().toISOString()}] ${msg}`;
     console.log(line);
     job.log.push(line);
+    job.updatedAt = new Date().toISOString();
+    persistJob(job);
   }
 
   try {
     job.status = 'running';
+    job.error = null;
+    persistJob(job);
     log(`Pipeline started — ${runLabel}`);
 
     // Step 1: bll_v3.R
@@ -334,11 +407,15 @@ async function runPipeline({ runId, runDir, runLabel, gtfPath, lowConf, highConf
     job.outputs = listRunOutputs(runDir);
 
     job.status = 'completed';
+    job.endedAt = new Date().toISOString();
+    persistJob(job);
     log(`Done. Files: ${job.outputs.join(', ')}`);
 
   } catch (err) {
     job.status = 'failed';
     job.error  = err.message;
+    job.endedAt = new Date().toISOString();
+    persistJob(job);
     log(`ERROR: ${err.message}`);
   }
 }

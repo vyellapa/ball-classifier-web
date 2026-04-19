@@ -1,6 +1,6 @@
 # B-ALL RNA-Seq Classifier
 
-Web application for running the B-ALL RNA-seq classification pipeline from a browser. The app accepts a `quant.sf` file, runs the R-based pipeline, and writes results into a per-run folder under `runs/`.
+Web application for running the B-ALL RNA-seq classification pipeline from a browser. The app accepts a `quant.sf` file, runs the R-based pipeline, and writes results plus run metadata into a per-run folder under `runs/`.
 
 ## Requirements
 
@@ -121,6 +121,17 @@ Results are written to:
 runs/<run-id>/
 ```
 
+Each run directory also stores a `run-manifest.json` file that records:
+
+- Run label
+- Status
+- Timestamps
+- Log output
+- Output file list
+- Any terminal error message
+
+This means previous runs remain visible in the web UI after a server restart. If the server stops while a pipeline is still running, that run is restored in the UI as `interrupted` on the next startup.
+
 Typical output files include:
 
 - `B-ALL_final_calls_<date>.txt`
@@ -145,6 +156,5 @@ Typical output files include:
 
 ## Notes
 
-- `node_modules/` is currently present in this folder, but it normally should not be committed to GitHub.
-- `runs/` contains generated outputs and may also be better excluded from Git if you only want source files in the repository.
-- The server keeps job state in memory, so restarting the app clears in-memory job history even though output files remain on disk.
+- `node_modules/` is only needed in the repository for offline or restricted environments where dependencies cannot be installed during deployment. In normal Git-based workflows, commit `package.json` and `package-lock.json` instead and run `npm install` on the target machine.
+- Run history is persisted on disk inside each `runs/<run-id>/run-manifest.json`, so restarting the server does not clear the UI history.
