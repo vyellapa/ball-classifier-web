@@ -317,9 +317,11 @@ app.get('/api/umap/:runId', (req, res) => {
           if (scoreRow) {
             Object.assign(queryPoint, {
               allcatcher_call: scoreRow.AllCatcher_call,
+              allcatcher_terminal: scoreRow.AllCatcher_terminal,
               allcatcher_score: Number(scoreRow.AllCatcher_score),
               allcatcher_conf: scoreRow.AllCatcher_conf,
               allsorts_call: scoreRow.AllSorts_call,
+              allsorts_terminal: scoreRow.AllSorts_terminal,
               allsorts_score: Number(scoreRow.AllSorts_score),
               mdall_call: scoreRow.MDALL_call,
               mdall_score: Number(scoreRow.MDALL_score),

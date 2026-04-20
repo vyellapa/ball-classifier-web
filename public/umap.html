@@ -535,15 +535,14 @@ async function loadUmap() {
         y: sub.map(r => r.uMAP_2),
         mode: 'markers', type: 'scatter',
         name: subtype,
-        text: sub.map(r => r.sample_id),
+        hoverinfo: 'skip',
         marker: {
           size: 12,
           opacity: 0.62,
           color,
           line: { color: 'rgba(13,17,23,0.45)', width: 0.5 }
         },
-        hoverlabel: { bgcolor: '#ffffff', bordercolor: color, font: { color: '#1a202c' } },
-        hovertemplate: `<b>%{text}</b><br>Subtype: ${subtype}<br>uMAP 1: %{x:.2f}<br>uMAP 2: %{y:.2f}<extra></extra>`
+        hoverlabel: { bgcolor: '#ffffff', bordercolor: color, font: { color: '#1a202c' } }
       };
     });
 
@@ -555,13 +554,14 @@ async function loadUmap() {
         text: [query.sample_id || 'Query sample'],
         customdata: [[
           subtypeOf(query),
-          query.final_class || 'NA', query.final_conf || 'NA',
+          query.final_class || 'NA',
           query.mdall_call || 'NA',
           Number.isFinite(query.mdall_score) ? query.mdall_score : null,
           query.allcatcher_call || 'NA',
+          query.allcatcher_terminal || query.allcatcher_call || 'NA',
           Number.isFinite(query.allcatcher_score) ? query.allcatcher_score : null,
-          query.allcatcher_conf || 'NA',
           query.allsorts_call || 'NA',
+          query.allsorts_terminal || query.allsorts_call || 'NA',
           Number.isFinite(query.allsorts_score) ? query.allsorts_score : null
         ]],
         marker: {
@@ -574,10 +574,10 @@ async function loadUmap() {
         hovertemplate:
           '<b>%{text}</b>' +
           '<br>Assigned subtype: %{customdata[0]}' +
-          '<br>Final class: %{customdata[1]} (%{customdata[2]})' +
-          '<br>MD-ALL: %{customdata[3]} | score %{customdata[4]:.3f}' +
-          '<br>ALLCatcher: %{customdata[5]} | score %{customdata[6]:.3f} (%{customdata[7]})' +
-          '<br>ALLSorts: %{customdata[8]} | score %{customdata[9]:.3f}' +
+          '<br>Final class: %{customdata[1]}' +
+          '<br>MD-ALL: %{customdata[2]} | subtype %{customdata[2]} | score %{customdata[3]:.3f}' +
+          '<br>ALLCatcher: %{customdata[4]} | subtype %{customdata[5]} | score %{customdata[6]:.3f}' +
+          '<br>ALLSorts: %{customdata[7]} | subtype %{customdata[8]} | score %{customdata[9]:.3f}' +
           '<br>uMAP 1: %{x:.2f}<br>uMAP 2: %{y:.2f}<extra></extra>'
       });
     }
